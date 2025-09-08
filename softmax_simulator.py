@@ -73,7 +73,6 @@ class Instruction:
     dependencies: Set[int]  # IDs of instructions this depends on
     data_size: int  # Size of data to process (in bytes)
     target_register: Optional[int] = None
-    source_registers: List[int] = None
     
     # Execution state
     issued: bool = False
@@ -82,10 +81,6 @@ class Instruction:
     issue_cycle: int = -1  # When instruction was issued
     start_cycle: int = -1  # When execution started
     complete_cycle: int = -1
-    
-    def __post_init__(self):
-        if self.source_registers is None:
-            self.source_registers = []
 
 
 # Instruction wrapper classes for simplified instruction creation
@@ -110,13 +105,16 @@ class ReduceInstruction:
     
     def __init__(self, id: int, target_register: int, source_registers: List[int], 
                  dependencies: Set[int] = None, data_size: int = 256):
+        # If dependencies not explicitly provided, derive from source_registers
+        if dependencies is None:
+            dependencies = set(source_registers) if source_registers else set()
+        
         self.instruction = Instruction(
             id=id,
             type=InstructionType.REDUCE,
-            dependencies=dependencies or set(),
+            dependencies=dependencies,
             data_size=data_size,  # Default 2048 bits = 256 bytes
-            target_register=target_register,
-            source_registers=source_registers
+            target_register=target_register
         )
     
     def __getattr__(self, name):
@@ -128,13 +126,16 @@ class FMAInstruction:
     
     def __init__(self, id: int, target_register: int, source_registers: List[int],
                  dependencies: Set[int] = None, data_size: int = 256):
+        # If dependencies not explicitly provided, derive from source_registers
+        if dependencies is None:
+            dependencies = set(source_registers) if source_registers else set()
+        
         self.instruction = Instruction(
             id=id,
             type=InstructionType.FMA,
-            dependencies=dependencies or set(),
+            dependencies=dependencies,
             data_size=data_size,  # Default 2048 bits = 256 bytes
-            target_register=target_register,
-            source_registers=source_registers
+            target_register=target_register
         )
     
     def __getattr__(self, name):
@@ -146,13 +147,16 @@ class EXP2Instruction:
     
     def __init__(self, id: int, target_register: int, source_registers: List[int],
                  dependencies: Set[int] = None, data_size: int = 256):
+        # If dependencies not explicitly provided, derive from source_registers
+        if dependencies is None:
+            dependencies = set(source_registers) if source_registers else set()
+        
         self.instruction = Instruction(
             id=id,
             type=InstructionType.EXP2,
-            dependencies=dependencies or set(),
+            dependencies=dependencies,
             data_size=data_size,  # Default 2048 bits = 256 bytes
-            target_register=target_register,
-            source_registers=source_registers
+            target_register=target_register
         )
     
     def __getattr__(self, name):
@@ -164,12 +168,15 @@ class StoreInstruction:
     
     def __init__(self, id: int, source_registers: List[int], 
                  dependencies: Set[int] = None, data_size: int = 256):
+        # If dependencies not explicitly provided, derive from source_registers
+        if dependencies is None:
+            dependencies = set(source_registers) if source_registers else set()
+        
         self.instruction = Instruction(
             id=id,
             type=InstructionType.STORE,
-            dependencies=dependencies or set(),
-            data_size=data_size,  # Default 2048 bits = 256 bytes
-            source_registers=source_registers
+            dependencies=dependencies,
+            data_size=data_size  # Default 2048 bits = 256 bytes
         )
     
     def __getattr__(self, name):
@@ -714,7 +721,8 @@ def create_softmax_instruction_stream() -> List[Instruction]:
     """Create a sample instruction stream for softmax computation"""
     # Use custom data size (1024 bytes) for this example to maintain compatibility
     # with existing simulation, override the default 256 bytes
-    data_size = 1024
+    data_size = 2048
+    # num_heads = 128
     
     # Softmax typically involves:
     # 1. Load input data
@@ -725,33 +733,35 @@ def create_softmax_instruction_stream() -> List[Instruction]:
     # 6. Divide by sum (FMA)
     # 7. Store result
     
+
+    # for h in 
     instruction_wrappers = [
         # Load input vector
         LoadInstruction(id=0, target_register=0, data_size=data_size),
         
         # Find maximum value
         ReduceInstruction(id=1, target_register=1, source_registers=[0], 
-                         dependencies={0}, data_size=data_size),
+                         data_size=data_size),
         
         # Subtract max from all elements (x - max)
-        FMAInstruction(id=2, target_register=2, source_registers=[0, 1],
-                      dependencies={0, 1}, data_size=data_size),
+        FMAInstruction(id=2, target_register=2, source_registers=[1],
+                      data_size=data_size),
         
         # Compute exp2(x - max)
         EXP2Instruction(id=3, target_register=3, source_registers=[2],
-                       dependencies={2}, data_size=data_size),
+                       data_size=data_size),
         
         # Sum all exp values
         ReduceInstruction(id=4, target_register=4, source_registers=[3],
-                         dependencies={3}, data_size=data_size),
+                         data_size=data_size),
         
         # Divide by sum (exp / sum)
         FMAInstruction(id=5, target_register=5, source_registers=[3, 4],
-                      dependencies={3, 4}, data_size=data_size),
+                      data_size=data_size),
         
         # Store result
         StoreInstruction(id=6, source_registers=[5], 
-                        dependencies={5}, data_size=data_size)
+                        data_size=data_size)
     ]
     
     # Extract the underlying Instruction objects for compatibility
@@ -762,7 +772,7 @@ def main():
     """Example usage of the softmax simulator"""
     # Create processor configuration
     config = ProcessorConfig(
-        register_width=1024,
+        register_width=2048,
         compute_unit_width=512,
         cache_bandwidth=64,
         execution_mode=ExecutionMode.OUT_OF_ORDER,
