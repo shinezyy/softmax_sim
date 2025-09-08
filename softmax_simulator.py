@@ -329,11 +329,16 @@ class InstructionExecutor:
     def _split_memory_instruction(self, instruction: Instruction) -> List[MicroOp]:
         """Split load or store instruction into uops"""
         # Max bytes per instruction: vl/8
-        max_bytes_per_instruction = self.config.compute_unit_width // 8
+        max_bytes_per_instruction = self.config.register_width // 8
         # Bytes per cycle limited by cache bandwidth
         bytes_per_cycle = self.config.cache_bandwidth
-        
-        actual_bytes = min(max_bytes_per_instruction, instruction.data_size)
+        actual_bytes = instruction.data_size // 8
+
+        print(f"Max bytes per instruction: {max_bytes_per_instruction}")
+        print(f"Bytes per cycle: {bytes_per_cycle}")
+        print(f"Instruction data bytes: {actual_bytes}")
+
+        assert actual_bytes <= max_bytes_per_instruction
         
         uops = []
         remaining_bytes = actual_bytes
@@ -345,14 +350,18 @@ class InstructionExecutor:
             latency = (self.config.load_latency if instruction.type == InstructionType.LOAD
                       else self.config.store_latency)
             
+            # Create dependencies: each uop depends on the previous one (except the first)
+            dependencies = set()
+            
             uop = MicroOp(
                 instruction_id=instruction.id,
                 uop_id=uop_id,
                 type=instruction.type,
                 data_size=bytes_in_uop,
-                dependencies=set(),
+                dependencies=dependencies,
                 latency=latency
             )
+            # print(f"uop {uop_id} dependencies: {dependencies}")
             uops.append(uop)
             
             remaining_bytes -= bytes_in_uop  
@@ -404,6 +413,9 @@ class VectorProcessor:
         
         # Fix reduce instruction dependencies
         self._fix_reduce_dependencies()
+        
+        # Fix memory instruction dependencies
+        self._fix_memory_dependencies()
     
     def _fix_reduce_dependencies(self):
         """Fix dependencies for reduce instruction uops after all uops are loaded"""
@@ -430,6 +442,24 @@ class VectorProcessor:
                             for i in range(first_phase_uops, len(uop_ids)):
                                 uop_global_id = uop_ids[i]
                                 self.uops[uop_global_id].dependencies = first_phase_global_ids.copy()
+    
+    def _fix_memory_dependencies(self):
+        """Fix dependencies for memory instruction uops after all uops are loaded"""
+        for instruction in self.instructions:
+            if instruction.type in [InstructionType.LOAD, InstructionType.STORE]:
+                uop_ids = self.instruction_uop_map[instruction.id]
+                
+                # Fix dependencies: convert local IDs to global IDs
+                for i, global_uop_id in enumerate(uop_ids):
+                    uop = self.uops[global_uop_id]
+                    new_dependencies = set()
+                    
+                    for local_dep_id in uop.dependencies:
+                        # Convert local dependency ID to global ID
+                        global_dep_id = uop_ids[local_dep_id]
+                        new_dependencies.add(global_dep_id)
+                    
+                    uop.dependencies = new_dependencies
     
     def simulate(self, max_cycles: int = 10000) -> Dict:
         """Run the simulation and return results"""
@@ -537,8 +567,10 @@ class VectorProcessor:
     
     def _issue_uop(self, uop: MicroOp) -> bool:
         """Try to issue a uop to an execution unit"""
-        # Check resource availability
+        # Check resource availability for memory operations
         if uop.type in [InstructionType.LOAD, InstructionType.STORE]:
+            # Each memory uop size is typically equal to cache_bandwidth (except possibly the last one)
+            # This ensures at most one memory uop can be issued per cycle due to bandwidth constraints
             if self.cache_bandwidth_used + uop.data_size > self.config.cache_bandwidth:
                 return False
             self.cache_bandwidth_used += uop.data_size
