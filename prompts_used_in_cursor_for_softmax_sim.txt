@@ -44,3 +44,6 @@ Current design is using compute_unit_width and arithmetic_bandwidth_used to limi
 ## instruction tracked in dict
 change self.instructions in VectorProcessor from Lilst of instruction to dict of (id, instruction). Because we want instruction id to increase with jumping
 
+## add argparse
+
+add argparser to support simulate in-order and out-of-order from cmdline

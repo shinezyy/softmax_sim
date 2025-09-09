@@ -11,6 +11,7 @@ from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass
 import math
 import copy
+import argparse
 
 
 class InstructionType(Enum):
@@ -926,7 +927,7 @@ def create_softmax_instruction_stream() -> List[Instruction]:
     # Use custom data size (1024 bytes) for this example to maintain compatibility
     # with existing simulation, override the default 256 bytes
     data_size = 2048
-    num_heads = 4
+    num_heads = 3
     
     # Softmax typically involves:
     # 1. Load input data
@@ -994,19 +995,96 @@ def create_softmax_instruction_stream() -> List[Instruction]:
     return [wrapper.instruction for wrapper in all_insts]
 
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="RISC-V Vector Processor Softmax Simulator",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    parser.add_argument(
+        "--execution-mode", 
+        choices=["in-order", "out-of-order"], 
+        default="in-order",
+        help="Execution mode for the processor"
+    )
+    
+    parser.add_argument(
+        "--register-width",
+        type=int,
+        choices=[512, 1024, 2048],
+        default=2048,
+        help="Register width in bits"
+    )
+    
+    parser.add_argument(
+        "--reduce-compute-width",
+        type=int,
+        choices=[128, 256, 512, 1024],
+        default=512,
+        help="Reduce compute unit width in bits"
+    )
+    
+    parser.add_argument(
+        "--simple-elementwise-width",
+        type=int,
+        choices=[128, 256, 512, 1024],
+        default=512,
+        help="Simple elementwise compute unit width in bits"
+    )
+    
+    parser.add_argument(
+        "--complex-elementwise-width",
+        type=int,
+        choices=[128, 256, 512, 1024],
+        default=512,
+        help="Complex elementwise compute unit width in bits"
+    )
+    
+    parser.add_argument(
+        "--cache-bandwidth",
+        type=int,
+        choices=[32, 64, 128],
+        default=64,
+        help="Cache bandwidth in bytes per cycle"
+    )
+    
+    parser.add_argument(
+        "--chaining",
+        action="store_true",
+        default=True,
+        help="Enable chaining"
+    )
+    
+    parser.add_argument(
+        "--ooo-window-size",
+        type=int,
+        default=128,
+        help="Out-of-order execution window size"
+    )
+    
+    return parser.parse_args()
+
+
 def main():
     """Example usage of the softmax simulator"""
-    # Create processor configuration
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Convert string execution mode to enum
+    execution_mode = ExecutionMode.IN_ORDER if args.execution_mode == "in-order" else ExecutionMode.OUT_OF_ORDER
+    
+    # Create processor configuration from arguments
     config = ProcessorConfig(
-        register_width=2048,
-        reduce_compute_unit_width=512,  # Dedicated bandwidth for reduce operations
-        simple_elementwise_compute_unit_width=512,  # Dedicated bandwidth for FMA operations
-        complex_elementwise_compute_unit_width=512,  # Dedicated bandwidth for EXP2 operations
-        cache_bandwidth=64,
-        chaining_enabled=True,  # Enable chaining for debugging
-        chaining_granularity=64,
-        execution_mode=ExecutionMode.OUT_OF_ORDER,
-        ooo_window_size=128
+        register_width=args.register_width,
+        reduce_compute_unit_width=args.reduce_compute_width,
+        simple_elementwise_compute_unit_width=args.simple_elementwise_width,
+        complex_elementwise_compute_unit_width=args.complex_elementwise_width,
+        cache_bandwidth=args.cache_bandwidth,
+        chaining_enabled=args.chaining,
+        chaining_granularity=64,  # Keep default granularity
+        execution_mode=execution_mode,
+        ooo_window_size=args.ooo_window_size
     )
     
     print("RISC-V Vector Processor Softmax Simulator")
