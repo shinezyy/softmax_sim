@@ -30,7 +30,9 @@ class ExecutionMode(Enum):
 class ProcessorConfig:
     """Configuration parameters for the RISC-V vector processor"""
     register_width: int  # rl: 512, 1024, 2048 bits
-    compute_unit_width: int  # vl: 128, 256, 512, 1024 bits (must be <= register_width)
+    reduce_compute_unit_width: int  # vl: 128, 256, 512, 1024 bits for reduce operations
+    simple_elementwise_compute_unit_width: int  # vl: 128, 256, 512, 1024 bits for simple elementwise (FMA)
+    complex_elementwise_compute_unit_width: int  # vl: 128, 256, 512, 1024 bits for complex elementwise (EXP2)
     cache_bandwidth: int  # 32, 64, 128 bytes per cycle
     execution_mode: ExecutionMode
     chaining_enabled: bool = False
@@ -47,8 +49,13 @@ class ProcessorConfig:
     ooo_window_size: int = 16
     
     def __post_init__(self):
-        if self.compute_unit_width > self.register_width:
-            raise ValueError("Compute unit width cannot exceed register width")
+        # Check that all compute unit widths don't exceed register width
+        if self.reduce_compute_unit_width > self.register_width:
+            raise ValueError("Reduce compute unit width cannot exceed register width")
+        if self.simple_elementwise_compute_unit_width > self.register_width:
+            raise ValueError("Simple elementwise compute unit width cannot exceed register width")
+        if self.complex_elementwise_compute_unit_width > self.register_width:
+            raise ValueError("Complex elementwise compute unit width cannot exceed register width")
         
         valid_reg_widths = [512, 1024, 2048]
         valid_compute_widths = [128, 256, 512, 1024]
@@ -57,8 +64,12 @@ class ProcessorConfig:
         
         if self.register_width not in valid_reg_widths:
             raise ValueError(f"Invalid register width: {self.register_width}")
-        if self.compute_unit_width not in valid_compute_widths:
-            raise ValueError(f"Invalid compute unit width: {self.compute_unit_width}")
+        if self.reduce_compute_unit_width not in valid_compute_widths:
+            raise ValueError(f"Invalid reduce compute unit width: {self.reduce_compute_unit_width}")
+        if self.simple_elementwise_compute_unit_width not in valid_compute_widths:
+            raise ValueError(f"Invalid simple elementwise compute unit width: {self.simple_elementwise_compute_unit_width}")
+        if self.complex_elementwise_compute_unit_width not in valid_compute_widths:
+            raise ValueError(f"Invalid complex elementwise compute unit width: {self.complex_elementwise_compute_unit_width}")
         if self.cache_bandwidth not in valid_cache_bw:
             raise ValueError(f"Invalid cache bandwidth: {self.cache_bandwidth}")
         if self.chaining_granularity not in valid_chain_gran:
@@ -242,7 +253,7 @@ class InstructionExecutor:
         # Max elements per instruction: M = rl/16 (bf16 = 2 bytes, so 16 bits)
         max_elements = self.config.register_width // 16
         # Elements per cycle: N = vl/16  
-        elements_per_cycle = self.config.compute_unit_width // 16
+        elements_per_cycle = self.config.reduce_compute_unit_width // 16
         
         # Actual elements to process
         actual_elements = min(max_elements, instruction.data_size // 2)  # bf16 = 2 bytes
@@ -314,8 +325,13 @@ class InstructionExecutor:
         """Split FMA or EXP2 instruction into uops"""
         # Max elements per instruction: rl/16 (bf16)
         max_elements = self.config.register_width // 16
-        # Elements per cycle: vl/16
-        elements_per_cycle = self.config.compute_unit_width // 16
+        # Elements per cycle: vl/16 - use appropriate compute unit width based on instruction type
+        if instruction.type == InstructionType.FMA:
+            elements_per_cycle = self.config.simple_elementwise_compute_unit_width // 16
+        elif instruction.type == InstructionType.EXP2:
+            elements_per_cycle = self.config.complex_elementwise_compute_unit_width // 16
+        else:
+            raise ValueError(f"Invalid arithmetic instruction type: {instruction.type}")
         
         actual_elements = min(max_elements, instruction.data_size // 2)  # bf16 = 2 bytes
         
@@ -413,8 +429,10 @@ class VectorProcessor:
         # Cache bandwidth tracking
         self.cache_bandwidth_used = 0
         
-        # Arithmetic bandwidth tracking (in bytes)
-        self.arithmetic_bandwidth_used = 0
+        # Separate arithmetic bandwidth tracking for each instruction type (in bytes)
+        self.reduce_bandwidth_used = 0
+        self.simple_elementwise_bandwidth_used = 0
+        self.complex_elementwise_bandwidth_used = 0
     
     def load_instructions(self, instructions: List[Instruction]):
         """Load instruction stream into the processor"""
@@ -451,7 +469,7 @@ class VectorProcessor:
                     # Find the boundary between first phase and subsequent phases
                     # First, calculate expected first phase uops
                     max_elements = self.config.register_width // 16
-                    elements_per_cycle = self.config.compute_unit_width // 16
+                    elements_per_cycle = self.config.reduce_compute_unit_width // 16
                     actual_elements = min(max_elements, instruction.data_size // 2)
                     
                     if actual_elements > elements_per_cycle:
@@ -577,7 +595,9 @@ class VectorProcessor:
         """Simulate a single cycle"""
         # Reset per-cycle state
         self.cache_bandwidth_used = 0
-        self.arithmetic_bandwidth_used = 0
+        self.reduce_bandwidth_used = 0
+        self.simple_elementwise_bandwidth_used = 0
+        self.complex_elementwise_bandwidth_used = 0
         
         # Update execution units and complete uops
         self._update_execution_units()
@@ -663,14 +683,25 @@ class VectorProcessor:
                 return False
             self.cache_bandwidth_used += uop.data_size
         
-        # Check resource availability for arithmetic operations
-        if uop.type in [InstructionType.FMA, InstructionType.EXP2, InstructionType.REDUCE]:
-            # Check if issuing this uop would exceed the compute unit width
-            # compute_unit_width is in bits, uop.data_size is in bytes
-            compute_unit_bytes = self.config.compute_unit_width // 8
-            if self.arithmetic_bandwidth_used + uop.data_size > compute_unit_bytes:
+        # Check resource availability for arithmetic operations with separate bandwidth tracking
+        if uop.type == InstructionType.REDUCE:
+            # Check if issuing this uop would exceed the reduce compute unit width
+            reduce_compute_unit_bytes = self.config.reduce_compute_unit_width // 8
+            if self.reduce_bandwidth_used + uop.data_size > reduce_compute_unit_bytes:
                 return False
-            self.arithmetic_bandwidth_used += uop.data_size
+            self.reduce_bandwidth_used += uop.data_size
+        elif uop.type == InstructionType.FMA:
+            # Check if issuing this uop would exceed the simple elementwise compute unit width
+            simple_compute_unit_bytes = self.config.simple_elementwise_compute_unit_width // 8
+            if self.simple_elementwise_bandwidth_used + uop.data_size > simple_compute_unit_bytes:
+                return False
+            self.simple_elementwise_bandwidth_used += uop.data_size
+        elif uop.type == InstructionType.EXP2:
+            # Check if issuing this uop would exceed the complex elementwise compute unit width
+            complex_compute_unit_bytes = self.config.complex_elementwise_compute_unit_width // 8
+            if self.complex_elementwise_bandwidth_used + uop.data_size > complex_compute_unit_bytes:
+                return False
+            self.complex_elementwise_bandwidth_used += uop.data_size
         
         # Issue the uop
         uop.issued = True
@@ -912,7 +943,9 @@ def main():
     # Create processor configuration
     config = ProcessorConfig(
         register_width=2048,
-        compute_unit_width=512,
+        reduce_compute_unit_width=512,  # Dedicated bandwidth for reduce operations
+        simple_elementwise_compute_unit_width=512,  # Dedicated bandwidth for FMA operations
+        complex_elementwise_compute_unit_width=512,  # Dedicated bandwidth for EXP2 operations
         cache_bandwidth=64,
         execution_mode=ExecutionMode.OUT_OF_ORDER,
         chaining_enabled=True,  # Enable chaining for debugging
@@ -929,7 +962,9 @@ def main():
     print("=" * 50)
     print(f"Configuration:")
     print(f"  Register width: {config.register_width} bits")
-    print(f"  Compute unit width: {config.compute_unit_width} bits")
+    print(f"  Reduce compute unit width: {config.reduce_compute_unit_width} bits")
+    print(f"  Simple elementwise compute unit width: {config.simple_elementwise_compute_unit_width} bits")
+    print(f"  Complex elementwise compute unit width: {config.complex_elementwise_compute_unit_width} bits")
     print(f"  Cache bandwidth: {config.cache_bandwidth} bytes/cycle")
     print(f"  Execution mode: {config.execution_mode.value}")
     print(f"  Chaining: {'enabled' if config.chaining_enabled else 'disabled'}")
