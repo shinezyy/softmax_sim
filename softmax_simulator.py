@@ -433,6 +433,10 @@ class VectorProcessor:
         self.reduce_bandwidth_used = 0
         self.simple_elementwise_bandwidth_used = 0
         self.complex_elementwise_bandwidth_used = 0
+        
+        # Outstanding (issued but not completed) counts tracking
+        self.outstanding_instruction_count = 0
+        self.outstanding_uop_count = 0
     
     def load_instructions(self, instructions: List[Instruction]):
         """Load instruction stream into the processor"""
@@ -580,6 +584,10 @@ class VectorProcessor:
             uop.start_cycle = uop.complete_cycle = -1
             uop.ready_elements = 0
         
+        # Reset outstanding counts
+        self.outstanding_instruction_count = 0
+        self.outstanding_uop_count = 0
+        
         while not self._all_instructions_completed() and self.current_cycle < max_cycles:
             self._simulate_cycle()
             self.current_cycle += 1
@@ -624,6 +632,9 @@ class VectorProcessor:
                     uop.completed = True
                     uop.complete_cycle = self.current_cycle
                     completed_uops.append(uop_info)
+                    
+                    # Update outstanding uop count
+                    self.outstanding_uop_count -= 1
             
             # Remove completed uops
             for uop_info in completed_uops:
@@ -631,10 +642,16 @@ class VectorProcessor:
     
     def _issue_in_order(self):
         """Issue uops in order"""
+        simulated_window_size = 10
+        incompleted_uop_count = 0
         for uop in self.uops:
             if not uop.issued and self._can_issue_uop(uop):
                 if self._issue_uop(uop):
-                    break  # Issue one uop per cycle in strict in-order
+                    break
+            if not uop.completed:
+                incompleted_uop_count += 1
+            if incompleted_uop_count >= simulated_window_size:
+                break
     
     def _issue_out_of_order(self):
         """Issue uops out of order within a window"""
@@ -711,6 +728,9 @@ class VectorProcessor:
         
         self.execution_units[uop.type].append((self.uops.index(uop), complete_cycle))
         
+        # Update outstanding uop count
+        self.outstanding_uop_count += 1
+        
         return True
     
     def _handle_chaining(self):
@@ -749,6 +769,9 @@ class VectorProcessor:
                     if issued_uops:
                         instruction.issue_cycle = min(uop.start_cycle for uop in issued_uops)
                         instruction.issued = True
+                        
+                        # Update outstanding instruction count
+                        self.outstanding_instruction_count += 1
                 
                 if all(self.uops[uop_id].completed for uop_id in uop_ids):
                     instruction.completed = True
@@ -757,6 +780,9 @@ class VectorProcessor:
                     if instruction.start_cycle == -1:
                         instruction.start_cycle = min(self.uops[uop_id].start_cycle 
                                                     for uop_id in uop_ids)
+                    
+                    # Update outstanding instruction count
+                    self.outstanding_instruction_count -= 1
         
         return all(instruction.completed for instruction in self.instructions.values())
     
@@ -789,6 +815,14 @@ class VectorProcessor:
                 for uop in self.uops
             ]
         }
+    
+    def get_outstanding_instruction_count(self) -> int:
+        """Get the current number of outstanding instructions (issued but not completed)"""
+        return self.outstanding_instruction_count
+    
+    def get_outstanding_uop_count(self) -> int:
+        """Get the current number of outstanding uops (issued but not completed)"""
+        return self.outstanding_uop_count
     
     def visualize_execution(self):
         """Generate ASCII visualization of instruction execution timeline"""
@@ -971,7 +1005,7 @@ def main():
         cache_bandwidth=64,
         chaining_enabled=True,  # Enable chaining for debugging
         chaining_granularity=64,
-        execution_mode=ExecutionMode.IN_ORDER,
+        execution_mode=ExecutionMode.OUT_OF_ORDER,
         ooo_window_size=128
     )
     
@@ -1004,7 +1038,10 @@ def main():
     print()
     
     # Run simulation with longer timeout now
-    results = processor.simulate(max_cycles=1000)
+    results = processor.simulate(max_cycles=10000)
+
+    assert processor.get_outstanding_instruction_count() == 0
+    assert processor.get_outstanding_uop_count() == 0
     
     # Print results
     print("Simulation Results:")
