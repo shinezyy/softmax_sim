@@ -892,7 +892,7 @@ def create_softmax_instruction_stream() -> List[Instruction]:
     # Use custom data size (1024 bytes) for this example to maintain compatibility
     # with existing simulation, override the default 256 bytes
     data_size = 2048
-    # num_heads = 128
+    num_heads = 4
     
     # Softmax typically involves:
     # 1. Load input data
@@ -904,38 +904,56 @@ def create_softmax_instruction_stream() -> List[Instruction]:
     # 7. Store result
     
 
-    # for h in 
-    instruction_wrappers = [
-        # Load input vector
-        LoadInstruction(id=0, target_register=0, data_size=data_size),
-        
-        # Find maximum value
-        ReduceInstruction(id=1, target_register=1, source_registers=[0], 
-                         data_size=data_size),
-        
-        # Subtract max from all elements (x - max)
-        FMAInstruction(id=2, target_register=2, source_registers=[1],
-                      data_size=data_size),
-        
-        # Compute exp2(x - max)
-        EXP2Instruction(id=3, target_register=3, source_registers=[2],
-                       data_size=data_size),
-        
-        # Sum all exp values
-        ReduceInstruction(id=4, target_register=4, source_registers=[3],
-                         data_size=data_size),
-        
-        # Divide by sum (exp / sum)
-        FMAInstruction(id=5, target_register=5, source_registers=[3, 4],
-                      data_size=data_size),
-        
-        # Store result
-        StoreInstruction(id=6, source_registers=[5], 
-                        data_size=data_size)
-    ]
+    has_exp2_unit = False
+
+    for h in range(num_heads):
+        head_id = h*100
+        per_head_insts = [
+            # Load input vector
+            LoadInstruction(id=head_id + 0, target_register=head_id + 0, data_size=data_size),
+            
+            # Find maximum value
+            ReduceInstruction(id=head_id + 1, target_register=head_id + 1, source_registers=[head_id + 0], 
+                            data_size=data_size),
+            
+        ]
+        if has_exp2_unit:
+            per_head_insts += [
+                # Subtract max from all elements (x - max)
+                FMAInstruction(id=head_id + 2, target_register=head_id + 2, source_registers=[head_id + 1],
+                            data_size=data_size),
+                FMAInstruction(id=head_id + 3, target_register=head_id + 3, source_registers=[head_id + 2],
+                            data_size=data_size),
+                FMAInstruction(id=head_id + 4, target_register=head_id + 4, source_registers=[head_id + 3],
+                            data_size=data_size),
+                FMAInstruction(id=head_id + 5, target_register=head_id + 5, source_registers=[head_id + 4],
+                            data_size=data_size),
+                FMAInstruction(id=head_id + 6, target_register=head_id + 6, source_registers=[head_id + 5],
+                            data_size=data_size),
+                FMAInstruction(id=head_id + 7, target_register=head_id + 7, source_registers=[head_id + 6],
+                            data_size=data_size),
+            ]
+        else:
+            per_head_insts += [
+                # Compute exp2(x - max)
+                EXP2Instruction(id=head_id + 2, target_register=head_id + 7, source_registers=[head_id + 1],
+                            data_size=data_size),
+            ]
+
+        per_head_insts += [
+            # Sum all exp values
+            ReduceInstruction(id=head_id + 8, target_register=head_id + 8, source_registers=[head_id + 7],
+                            data_size=data_size),
+            # Divide by sum (exp / sum)
+            FMAInstruction(id=head_id + 9, target_register=head_id + 9, source_registers=[head_id + 7, head_id + 8],
+                        data_size=data_size),
+            # Store result
+            StoreInstruction(id=head_id + 10, source_registers=[head_id + 9], 
+                            data_size=data_size)
+        ]
     
     # Extract the underlying Instruction objects for compatibility
-    return [wrapper.instruction for wrapper in instruction_wrappers]
+    return [wrapper.instruction for wrapper in per_head_insts]
 
 
 def main():
