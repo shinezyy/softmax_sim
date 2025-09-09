@@ -413,7 +413,7 @@ class VectorProcessor:
         
         # Simulation state
         self.current_cycle = 0
-        self.instructions: List[Instruction] = []
+        self.instructions: Dict[int, Instruction] = {}
         self.uops: List[MicroOp] = []
         self.instruction_uop_map: Dict[int, List[int]] = {}  # instruction_id -> uop_ids
         
@@ -436,13 +436,13 @@ class VectorProcessor:
     
     def load_instructions(self, instructions: List[Instruction]):
         """Load instruction stream into the processor"""
-        self.instructions = instructions
+        self.instructions = {inst.id: inst for inst in instructions}
         self.uops = []
         self.instruction_uop_map = {}
         
         # Split all instructions into uops
         uop_offset = 0
-        for instruction in self.instructions:
+        for instruction in self.instructions.values():
             instruction_uops = self.executor.split_instruction_to_uops(instruction)
             self.uops.extend(instruction_uops)
             
@@ -462,7 +462,7 @@ class VectorProcessor:
     
     def _fix_reduce_dependencies(self):
         """Fix dependencies for reduce instruction uops after all uops are loaded"""
-        for instruction in self.instructions:
+        for instruction in self.instructions.values():
             if instruction.type == InstructionType.REDUCE:
                 uop_ids = self.instruction_uop_map[instruction.id]
                 if len(uop_ids) > 1:  # Multiple uops for this reduce instruction
@@ -488,7 +488,7 @@ class VectorProcessor:
     
     def _fix_memory_dependencies(self):
         """Fix dependencies for memory instruction uops after all uops are loaded"""
-        for instruction in self.instructions:
+        for instruction in self.instructions.values():
             if instruction.type in [InstructionType.LOAD, InstructionType.STORE]:
                 uop_ids = self.instruction_uop_map[instruction.id]
                 
@@ -506,13 +506,13 @@ class VectorProcessor:
     
     def _establish_chaining_dependencies(self):
         """Establish chaining dependencies between producer and consumer instructions"""
-        for producer_inst in self.instructions:
+        for producer_inst in self.instructions.values():
             # Skip if producer doesn't have element-wise destination
             if not producer_inst.element_wise_dest:
                 continue
             
             # Find consumer instructions that depend on this producer
-            for consumer_inst in self.instructions:
+            for consumer_inst in self.instructions.values():
                 # Skip if consumer doesn't have element-wise source
                 if not consumer_inst.element_wise_src:
                     continue
@@ -546,7 +546,7 @@ class VectorProcessor:
                 # Assert for load instructions - they should match compute instruction uop count
                 if producer_inst.type == InstructionType.LOAD:
                     # Find the next compute instruction that depends on this load
-                    for next_inst in self.instructions:
+                    for next_inst in self.instructions.values():
                         if (producer_inst.id in next_inst.dependencies and 
                             next_inst.type in [InstructionType.FMA, InstructionType.EXP2]):
                             next_uop_count = len(self.instruction_uop_map[next_inst.id])
@@ -571,7 +571,7 @@ class VectorProcessor:
         self.current_cycle = 0
         
         # Reset all state
-        for instruction in self.instructions:
+        for instruction in self.instructions.values():
             instruction.issued = instruction.started = instruction.completed = False
             instruction.issue_cycle = instruction.start_cycle = instruction.complete_cycle = -1
         
@@ -586,7 +586,7 @@ class VectorProcessor:
         
         if self.current_cycle >= max_cycles:
             print(f"Warning: Simulation reached maximum cycles ({max_cycles})")
-            print(f"Completed instructions: {sum(1 for inst in self.instructions if inst.completed)}/{len(self.instructions)}")
+            print(f"Completed instructions: {sum(1 for inst in self.instructions.values() if inst.completed)}/{len(self.instructions)}")
             print(f"Completed uops: {sum(1 for uop in self.uops if uop.completed)}/{len(self.uops)}")
         
         return self._generate_results()
@@ -740,7 +740,7 @@ class VectorProcessor:
     def _all_instructions_completed(self) -> bool:
         """Check if all instructions have completed"""
         # First update instruction completion status
-        for instruction in self.instructions:
+        for instruction in self.instructions.values():
             if not instruction.completed:
                 uop_ids = self.instruction_uop_map[instruction.id]
                 # Set issue_cycle when first uop is issued
@@ -758,7 +758,7 @@ class VectorProcessor:
                         instruction.start_cycle = min(self.uops[uop_id].start_cycle 
                                                     for uop_id in uop_ids)
         
-        return all(instruction.completed for instruction in self.instructions)
+        return all(instruction.completed for instruction in self.instructions.values())
     
     def _generate_results(self) -> Dict:
         """Generate simulation results"""
@@ -775,7 +775,7 @@ class VectorProcessor:
                     'complete_cycle': inst.complete_cycle,
                     'execution_time': inst.complete_cycle - inst.start_cycle if inst.start_cycle >= 0 else -1
                 }
-                for inst in self.instructions
+                for inst in self.instructions.values()
             ],
             'uops': [
                 {
@@ -811,7 +811,7 @@ class VectorProcessor:
         print("-" * len(cycle_header))
         
         # Generate timeline for each instruction
-        for inst in self.instructions:
+        for inst in self.instructions.values():
             timeline = [' '] * total_cycles
             
             # Mark issue cycle with @
@@ -906,6 +906,8 @@ def create_softmax_instruction_stream() -> List[Instruction]:
 
     has_exp2_unit = False
 
+    all_insts = []
+
     for h in range(num_heads):
         head_id = h*100
         per_head_insts = [
@@ -936,7 +938,7 @@ def create_softmax_instruction_stream() -> List[Instruction]:
         else:
             per_head_insts += [
                 # Compute exp2(x - max)
-                EXP2Instruction(id=head_id + 2, target_register=head_id + 7, source_registers=[head_id + 1],
+                EXP2Instruction(id=head_id + 7, target_register=head_id + 7, source_registers=[head_id + 1],
                             data_size=data_size),
             ]
 
@@ -951,9 +953,11 @@ def create_softmax_instruction_stream() -> List[Instruction]:
             StoreInstruction(id=head_id + 10, source_registers=[head_id + 9], 
                             data_size=data_size)
         ]
+
+        all_insts.extend(per_head_insts)
     
     # Extract the underlying Instruction objects for compatibility
-    return [wrapper.instruction for wrapper in per_head_insts]
+    return [wrapper.instruction for wrapper in all_insts]
 
 
 def main():
@@ -965,15 +969,10 @@ def main():
         simple_elementwise_compute_unit_width=512,  # Dedicated bandwidth for FMA operations
         complex_elementwise_compute_unit_width=512,  # Dedicated bandwidth for EXP2 operations
         cache_bandwidth=64,
-        execution_mode=ExecutionMode.OUT_OF_ORDER,
         chaining_enabled=True,  # Enable chaining for debugging
         chaining_granularity=64,
-        # reduce_latency=4,
-        # fma_latency=3,
-        # load_latency=2,
-        # store_latency=2,
-        # exp2_latency=5,
-        ooo_window_size=16
+        execution_mode=ExecutionMode.IN_ORDER,
+        ooo_window_size=128
     )
     
     print("RISC-V Vector Processor Softmax Simulator")
