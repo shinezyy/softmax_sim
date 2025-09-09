@@ -412,6 +412,9 @@ class VectorProcessor:
         
         # Cache bandwidth tracking
         self.cache_bandwidth_used = 0
+        
+        # Arithmetic bandwidth tracking (in bytes)
+        self.arithmetic_bandwidth_used = 0
     
     def load_instructions(self, instructions: List[Instruction]):
         """Load instruction stream into the processor"""
@@ -574,6 +577,7 @@ class VectorProcessor:
         """Simulate a single cycle"""
         # Reset per-cycle state
         self.cache_bandwidth_used = 0
+        self.arithmetic_bandwidth_used = 0
         
         # Update execution units and complete uops
         self._update_execution_units()
@@ -658,6 +662,15 @@ class VectorProcessor:
             if self.cache_bandwidth_used + uop.data_size > self.config.cache_bandwidth:
                 return False
             self.cache_bandwidth_used += uop.data_size
+        
+        # Check resource availability for arithmetic operations
+        if uop.type in [InstructionType.FMA, InstructionType.EXP2, InstructionType.REDUCE]:
+            # Check if issuing this uop would exceed the compute unit width
+            # compute_unit_width is in bits, uop.data_size is in bytes
+            compute_unit_bytes = self.config.compute_unit_width // 8
+            if self.arithmetic_bandwidth_used + uop.data_size > compute_unit_bytes:
+                return False
+            self.arithmetic_bandwidth_used += uop.data_size
         
         # Issue the uop
         uop.issued = True
