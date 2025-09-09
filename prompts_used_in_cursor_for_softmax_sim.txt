@@ -1,3 +1,4 @@
+## init prompt
 这是一个 softmax 架构模拟器，以下是他的设计需求文档：
 Softmax simulator
 目的：设计一个 softmax simulator 来建模 RISCV 向量处理器执行特定规模 softmax的时间。
@@ -15,6 +16,8 @@ Softmax simulator
 3.	Load：把最多vl/8 Byte 的数据加载到寄存器中，每个周期加载的数量取决于缓存带宽。Load 指令是全流水的。支持参数：load_latency。
 4.	Store：把最多vl/8 Byte 的数据从寄存器写入缓存中，每个周期写入的数量取决于缓存带宽。注意，load和store共享缓存带宽。Store 指令是全流水的。支持参数：store_latency。
 5.	Exp2：对最多 rl/16 个 bf16 的元素求 element-wise的exp2。每个周期最多处理vl/16个元素。Exp2单元是全流水的。Exp2 支持一个参数：exp2_latency。
+
+## Visualization
  
 现在我们需要新增一个需求：
 用ASCII字符可视化的方法输出每条指令的发射、执行和完成时间。发射的周期用 @ 表示，发射后的执行过程中用 – 表示，完成用!表示。
@@ -22,14 +25,22 @@ Softmax simulator
 原有的模拟器有一个输出功能，支持每条指令的执行时间的输出，现在希望新增每个 uop 的打印，所使用的符号和指令一致，需要标注出 uop id。发射的周期用 @ 表示，发射后的执行过程中用 – 表示，完成用!表示。
 
 
+## chaining
+
 当前设计有 ready_elements 这个变量，它是为了 chaining 准备的。在设计意图中， Chaining 的含义是前一条指令的部分元素就绪之后就允许开始执行后一条指令的依赖于就绪部分的 uop，无需等待整个指令的目标寄存器全部就绪。这样，chaining 可以挖掘同一条指令内部的并行度。这一切有一个前提：上一条指令的 element_wise_dest 为 True 并且当前指令的 element_wise_src 为 True，像 reduce 指令的输出不是 element wise，那么后续的指令就不能进行 chaining。当前的设计没有建立 chaining 、 ready_elements 和 uop 之间 关系，请完善这部分功能
 
 Chaining 的含义是前一条指令的部分元素就绪之后就允许开始执行后一条指令的依赖于就绪部分的 uop，无需等待整个指令的目标寄存器全部就绪。这样，chaining 可以挖掘同一条指令内部的并行度。这一切有一个前提：上一条指令的 element_wise_dest 为 True 并且当前指令的 element_wise_src 为 True，像 reduce 指令的输出不是 element wise，那么后续的指令就不能进行 chaining。我们可以做一些假设：1）两个可以实现 chaining 的指令的数据大小（producer 的 dest reg size 和 consumer 的 src reg size）一定是一样的；2）他们的指令拆分的 uop 的个数必须一样（你可以 assert 这个要求）。这样，建立 chaining 的依赖的时候就可以通过 producer 的多个 uop 和 consumer 的多个 uop 之间一一对应的方式实现，consumer 需要看到 producer uop 的 completed 为 true 才能发射。3）assert load 指令拆分的 uop 个数和后面的指令的 uop 个数一致，以免出现 cache bandwidth 与 compute width 不匹配导致错误依赖建立
 
 
+## Fix arith limit
+
 First, you can run this simulator with python softmax_simulator.py. Then you can find that two fma instructions, two exp2 instructions are issued in the same cycle, which exceeds the configured arithmic width(512bits). Please find why and fix it.
+
+## different limit for different inst types
 
 Current design is using compute_unit_width and arithmetic_bandwidth_used to limit the compute bandwidth of all the types of instructions. Now I want to divide arith instruction into 3 types: 1) reduce; 2) simple element wise (like FMA); and 3) complex element wise (like exp2). These 3 types should have dedicated compute_unit_width and arithmetic_bandwidth_used for themselves.
 
+
+## instruction tracked in dict
 change self.instructions in VectorProcessor from Lilst of instruction to dict of (id, instruction). Because we want instruction id to increase with jumping
 
