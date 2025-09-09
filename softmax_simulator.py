@@ -122,6 +122,9 @@ class ReduceInstruction:
             target_register=target_register,
             element_wise_src=True,
         )
+        # Reduce instruction specific
+        self.first_level_uop_count: int = 0  # Number of first-level uops for reduce instructions
+        
     
     def __getattr__(self, name):
         return getattr(self.instruction, name)
@@ -210,6 +213,9 @@ class MicroOp:
     completed: bool = False
     start_cycle: int = -1
     complete_cycle: int = -1
+    
+    # Chaining support - tracks how many elements are ready
+    ready_elements: int = 0
 
 
 class InstructionExecutor:
@@ -256,6 +262,7 @@ class InstructionExecutor:
                 latency=self.config.reduce_latency
             )
             uops.append(uop)
+            instruction.first_level_uop_count = 1
         else:
             # Multiple uops needed for first phase
             first_phase_uops = math.ceil(actual_elements / elements_per_cycle)
@@ -273,6 +280,7 @@ class InstructionExecutor:
                 )
                 uops.append(uop)
                 uop_id += 1
+            instruction.first_level_uop_count = first_phase_uops
             
             # Phase 2: Reduce the results from phase 1
             if first_phase_uops > 1:
@@ -426,6 +434,10 @@ class VectorProcessor:
         
         # Fix memory instruction dependencies
         self._fix_memory_dependencies()
+        
+        # Establish chaining dependencies if enabled
+        if self.config.chaining_enabled:
+            self._establish_chaining_dependencies()
     
     def _fix_reduce_dependencies(self):
         """Fix dependencies for reduce instruction uops after all uops are loaded"""
@@ -470,6 +482,68 @@ class VectorProcessor:
                         new_dependencies.add(global_dep_id)
                     
                     uop.dependencies = new_dependencies
+    
+    def _establish_chaining_dependencies(self):
+        """Establish chaining dependencies between producer and consumer instructions"""
+        for producer_inst in self.instructions:
+            # Skip if producer doesn't have element-wise destination
+            if not producer_inst.element_wise_dest:
+                continue
+            
+            # Find consumer instructions that depend on this producer
+            for consumer_inst in self.instructions:
+                # Skip if consumer doesn't have element-wise source
+                if not consumer_inst.element_wise_src:
+                    continue
+                
+                # Skip if consumer doesn't depend on producer
+                if producer_inst.id not in consumer_inst.dependencies:
+                    continue
+                
+                # Get uops for both instructions
+                producer_uop_ids = self.instruction_uop_map[producer_inst.id]
+                consumer_uop_ids = self.instruction_uop_map[consumer_inst.id]
+                
+                # Assert that data sizes match
+                assert producer_inst.data_size == consumer_inst.data_size, \
+                    f"Chaining requires matching data sizes: producer {producer_inst.id} " \
+                    f"({producer_inst.data_size}) vs consumer {consumer_inst.id} " \
+                    f"({consumer_inst.data_size})"
+                
+                # Assert that number of uops match
+                if consumer_inst.type == InstructionType.REDUCE:
+                    assert len(producer_uop_ids) == consumer_inst.first_level_uop_count, \
+                        f"Chaining requires matching uop counts: producer {producer_inst.id} " \
+                        f"({len(producer_uop_ids)} uops) vs consumer {consumer_inst.id} " \
+                        f"({consumer_inst.first_level_uop_count} uops)"
+                else:
+                    assert len(producer_uop_ids) == len(consumer_uop_ids), \
+                        f"Chaining requires matching uop counts: producer {producer_inst.id} " \
+                        f"({len(producer_uop_ids)} uops) vs consumer {consumer_inst.id} " \
+                        f"({len(consumer_uop_ids)} uops)"
+                
+                # Assert for load instructions - they should match compute instruction uop count
+                if producer_inst.type == InstructionType.LOAD:
+                    # Find the next compute instruction that depends on this load
+                    for next_inst in self.instructions:
+                        if (producer_inst.id in next_inst.dependencies and 
+                            next_inst.type in [InstructionType.FMA, InstructionType.EXP2]):
+                            next_uop_count = len(self.instruction_uop_map[next_inst.id])
+                            assert len(producer_uop_ids) == next_uop_count, \
+                                f"Load instruction {producer_inst.id} uop count ({len(producer_uop_ids)}) " \
+                                f"must match compute instruction {next_inst.id} uop count ({next_uop_count})"
+                            break
+                
+                # Establish one-to-one chaining dependencies
+                print(f"Establishing chaining between instruction {producer_inst.id} -> {consumer_inst.id}")
+                for i, (prod_uop_id, cons_uop_id) in enumerate(zip(producer_uop_ids, consumer_uop_ids)):
+                    # Consumer uop depends on corresponding producer uop completion
+                    self.uops[cons_uop_id].dependencies.add(prod_uop_id)
+                    print(f"  uop {consumer_inst.id}.{i} now depends on uop {producer_inst.id}.{i}")
+                
+                # Remove instruction-level dependency since we now have uop-level dependencies
+                consumer_inst.dependencies.discard(producer_inst.id)
+                print(f"  Removed instruction-level dependency {producer_inst.id} -> {consumer_inst.id}")
     
     def simulate(self, max_cycles: int = 10000) -> Dict:
         """Run the simulation and return results"""
@@ -597,17 +671,27 @@ class VectorProcessor:
     
     def _handle_chaining(self):
         """Handle chaining between instructions"""
-        # Simplified chaining implementation
-        # In practice, this would be much more complex
-        granularity_elements = self.config.chaining_granularity // 2  # bf16 elements
-        
+        if not self.config.chaining_enabled:
+            return
+            
+        # Calculate how many elements are ready for each running uop
         for uop in self.uops:
             if uop.started and not uop.completed:
                 # Calculate how many elements are ready based on progress
                 cycles_elapsed = self.current_cycle - uop.start_cycle
                 progress = min(1.0, cycles_elapsed / uop.latency)
-                elements_total = uop.data_size // 2  # bf16 elements
+                elements_total = uop.data_size // 2  # bf16 elements (2 bytes each)
                 uop.ready_elements = int(progress * elements_total)
+                
+                # For demonstration, print chaining progress
+                if cycles_elapsed == 1:  # Only print once per uop
+                    producer_inst = self.instructions[uop.instruction_id]
+                    if producer_inst.element_wise_dest:
+                        print(f"Chaining: uop {uop.instruction_id}.{uop.uop_id} has "
+                              f"{uop.ready_elements}/{elements_total} elements ready")
+        
+        # Note: The actual dependency checking for chaining is handled in _can_issue_uop
+        # based on the uop-level dependencies we established in _establish_chaining_dependencies
     
     def _all_instructions_completed(self) -> bool:
         """Check if all instructions have completed"""
