@@ -74,6 +74,10 @@ class Instruction:
     data_size: int  # Size of data to process (in bytes)
     target_register: Optional[int] = None
     
+    # Chaining support
+    element_wise_src: bool = False
+    element_wise_dest: bool = False
+    
     # Execution state
     issued: bool = False
     started: bool = False
@@ -93,7 +97,8 @@ class LoadInstruction:
             type=InstructionType.LOAD,
             dependencies=dependencies or set(),
             data_size=data_size,  # Default 2048 bits = 256 bytes
-            target_register=target_register
+            target_register=target_register,
+            element_wise_dest=True,
         )
     
     def __getattr__(self, name):
@@ -114,7 +119,8 @@ class ReduceInstruction:
             type=InstructionType.REDUCE,
             dependencies=dependencies,
             data_size=data_size,  # Default 2048 bits = 256 bytes
-            target_register=target_register
+            target_register=target_register,
+            element_wise_src=True,
         )
     
     def __getattr__(self, name):
@@ -135,7 +141,9 @@ class FMAInstruction:
             type=InstructionType.FMA,
             dependencies=dependencies,
             data_size=data_size,  # Default 2048 bits = 256 bytes
-            target_register=target_register
+            target_register=target_register,
+            element_wise_src=True,
+            element_wise_dest=True,
         )
     
     def __getattr__(self, name):
@@ -156,7 +164,9 @@ class EXP2Instruction:
             type=InstructionType.EXP2,
             dependencies=dependencies,
             data_size=data_size,  # Default 2048 bits = 256 bytes
-            target_register=target_register
+            target_register=target_register,
+            element_wise_src=True,
+            element_wise_dest=True,
         )
     
     def __getattr__(self, name):
@@ -176,7 +186,8 @@ class StoreInstruction:
             id=id,
             type=InstructionType.STORE,
             dependencies=dependencies,
-            data_size=data_size  # Default 2048 bits = 256 bytes
+            data_size=data_size,  # Default 2048 bits = 256 bytes
+            element_wise_src=True,
         )
     
     def __getattr__(self, name):
@@ -199,7 +210,6 @@ class MicroOp:
     completed: bool = False
     start_cycle: int = -1
     complete_cycle: int = -1
-    ready_elements: int = 0  # For chaining support
 
 
 class InstructionExecutor:
@@ -808,7 +818,7 @@ def main():
         compute_unit_width=512,
         cache_bandwidth=64,
         execution_mode=ExecutionMode.OUT_OF_ORDER,
-        chaining_enabled=True,
+        chaining_enabled=True,  # Enable chaining for debugging
         chaining_granularity=64,
         # reduce_latency=4,
         # fma_latency=3,
@@ -844,8 +854,8 @@ def main():
         print(f"  {inst.id}: {inst.type.value} ({inst.data_size} bytes, {deps_str})")
     print()
     
-    # Run simulation
-    results = processor.simulate()
+    # Run simulation with longer timeout now
+    results = processor.simulate(max_cycles=1000)
     
     # Print results
     print("Simulation Results:")
