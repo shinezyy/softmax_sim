@@ -44,7 +44,7 @@ class ProcessorConfig:
     fma_latency: int = 4
     load_latency: int = 10
     store_latency: int = 10
-    exp2_latency: int = 15
+    exp2_latency: int = 20
     
     # Out-of-order execution window size
     ooo_window_size: int = 16
@@ -58,7 +58,7 @@ class ProcessorConfig:
         if self.complex_elementwise_compute_unit_width > self.register_width:
             raise ValueError("Complex elementwise compute unit width cannot exceed register width")
         
-        valid_reg_widths = [512, 1024, 2048]
+        valid_reg_widths = [512, 1024, 2048, 4096]
         valid_compute_widths = [128, 256, 512, 1024]
         valid_cache_bw = [32, 64, 128]
         valid_chain_gran = [32, 64, 128, 256]
@@ -922,12 +922,11 @@ class VectorProcessor:
         print(f"Total uop execution time: {total_cycles} cycles")
 
 
-def create_softmax_instruction_stream() -> List[Instruction]:
+def create_softmax_instruction_stream(reg_width, has_exp2_unit, num_heads) -> List[Instruction]:
     """Create a sample instruction stream for softmax computation"""
     # Use custom data size (1024 bytes) for this example to maintain compatibility
     # with existing simulation, override the default 256 bytes
-    data_size = 2048
-    num_heads = 3
+    data_size = reg_width
     
     # Softmax typically involves:
     # 1. Load input data
@@ -938,8 +937,6 @@ def create_softmax_instruction_stream() -> List[Instruction]:
     # 6. Divide by sum (FMA)
     # 7. Store result
     
-
-    has_exp2_unit = False
 
     all_insts = []
 
@@ -954,7 +951,7 @@ def create_softmax_instruction_stream() -> List[Instruction]:
                             data_size=data_size),
             
         ]
-        if has_exp2_unit:
+        if not has_exp2_unit:
             per_head_insts += [
                 # Subtract max from all elements (x - max)
                 FMAInstruction(id=head_id + 2, target_register=head_id + 2, source_registers=[head_id + 1],
@@ -1008,13 +1005,33 @@ def parse_arguments():
         default="in-order",
         help="Execution mode for the processor"
     )
+
+    parser.add_argument(
+        "--exp2-unit",
+        action="store_true",
+        help="If true implement softmax with exp2 unit (requires complex elementwise unit)"
+    )
+
+    parser.add_argument(
+        "--num-heads",
+        type=int,
+        default=8,
+        help="The number of attention heads",
+    )
     
     parser.add_argument(
         "--register-width",
         type=int,
-        choices=[512, 1024, 2048],
+        choices=[512, 1024, 2048, 4096],
         default=2048,
         help="Register width in bits"
+    )
+
+    parser.add_argument(
+        "--all-compute-widths",
+        choices=[128, 256, 512, 1024],
+        default=512,
+        help="Control all compute unit widths in bits",
     )
     
     parser.add_argument(
@@ -1073,13 +1090,22 @@ def main():
     
     # Convert string execution mode to enum
     execution_mode = ExecutionMode.IN_ORDER if args.execution_mode == "in-order" else ExecutionMode.OUT_OF_ORDER
+
+    if args.all_compute_widths is not None:
+        reduce_width = args.all_compute_widths
+        simple_width = args.all_compute_widths
+        complex_width = args.all_compute_widths
+    else:
+        reduce_width = args.reduce_compute_width
+        simple_width = args.simple_elementwise_width
+        complex_width = args.complex_elementwise_width
     
     # Create processor configuration from arguments
     config = ProcessorConfig(
         register_width=args.register_width,
-        reduce_compute_unit_width=args.reduce_compute_width,
-        simple_elementwise_compute_unit_width=args.simple_elementwise_width,
-        complex_elementwise_compute_unit_width=args.complex_elementwise_width,
+        reduce_compute_unit_width=reduce_width,
+        simple_elementwise_compute_unit_width=simple_width,
+        complex_elementwise_compute_unit_width=complex_width,
         cache_bandwidth=args.cache_bandwidth,
         chaining_enabled=args.chaining,
         chaining_granularity=64,  # Keep default granularity
@@ -1105,7 +1131,7 @@ def main():
     processor = VectorProcessor(config)
     
     # Load sample softmax instruction stream
-    instructions = create_softmax_instruction_stream()
+    instructions = create_softmax_instruction_stream(args.register_width, args.exp2_unit, args.num_heads)
     processor.load_instructions(instructions)
     
     print(f"Loaded {len(instructions)} instructions for softmax computation")
