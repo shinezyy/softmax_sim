@@ -7,6 +7,7 @@ with configurable architecture parameters and instruction scheduling.
 """
 
 from enum import Enum
+import re
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass
 import math
@@ -192,7 +193,7 @@ class StoreInstruction:
     """Simplified wrapper for creating STORE instructions"""
     
     def __init__(self, id: int, source_registers: List[int], 
-                 dependencies: Set[int] = None, data_size: int = 256):
+                 dependencies: Set[int] = None, target_mem: int = None, data_size: int = 256):
         # If dependencies not explicitly provided, derive from source_registers
         if dependencies is None:
             dependencies = set(source_registers) if source_registers else set()
@@ -202,6 +203,7 @@ class StoreInstruction:
             type=InstructionType.STORE,
             dependencies=dependencies,
             data_size=data_size,  # Default 2048 bits = 256 bytes
+            target_register=target_mem,
             element_wise_src=True,
         )
     
@@ -922,10 +924,13 @@ class VectorProcessor:
         print(f"Total uop execution time: {total_cycles} cycles")
 
 
-def create_softmax_instruction_stream(reg_width, has_exp2_unit, num_heads) -> List[Instruction]:
+def create_softmax_instruction_stream(reg_width, has_exp2_unit, num_heads, seq_chunk_bit) -> List[Instruction]:
     """Create a sample instruction stream for softmax computation"""
     # Use custom data size (1024 bytes) for this example to maintain compatibility
     # with existing simulation, override the default 256 bytes
+
+    explicit_split_count = seq_chunk_bit // reg_width
+    assert explicit_split_count * reg_width == seq_chunk_bit
     data_size = reg_width
     
     # Softmax typically involves:
@@ -936,55 +941,83 @@ def create_softmax_instruction_stream(reg_width, has_exp2_unit, num_heads) -> Li
     # 5. Sum all exp values (reduce) 
     # 6. Divide by sum (FMA)
     # 7. Store result
-    
 
     all_insts = []
 
     for h in range(num_heads):
-        head_id = h*100
-        per_head_insts = [
-            # Load input vector
-            LoadInstruction(id=head_id + 0, target_register=head_id + 0, data_size=data_size),
-            
-            # Find maximum value
-            ReduceInstruction(id=head_id + 1, target_register=head_id + 1, source_registers=[head_id + 0], 
-                            data_size=data_size),
-            
-        ]
-        if not has_exp2_unit:
-            per_head_insts += [
-                # Subtract max from all elements (x - max)
-                FMAInstruction(id=head_id + 2, target_register=head_id + 2, source_registers=[head_id + 1],
-                            data_size=data_size),
-                FMAInstruction(id=head_id + 3, target_register=head_id + 3, source_registers=[head_id + 2],
-                            data_size=data_size),
-                FMAInstruction(id=head_id + 4, target_register=head_id + 4, source_registers=[head_id + 3],
-                            data_size=data_size),
-                FMAInstruction(id=head_id + 5, target_register=head_id + 5, source_registers=[head_id + 4],
-                            data_size=data_size),
-                FMAInstruction(id=head_id + 6, target_register=head_id + 6, source_registers=[head_id + 5],
-                            data_size=data_size),
-                FMAInstruction(id=head_id + 7, target_register=head_id + 7, source_registers=[head_id + 6],
-                            data_size=data_size),
-            ]
-        else:
-            per_head_insts += [
-                # Compute exp2(x - max)
-                EXP2Instruction(id=head_id + 7, target_register=head_id + 7, source_registers=[head_id + 1],
-                            data_size=data_size),
-            ]
+        head_id = h*1000
+        per_head_insts = []
 
-        per_head_insts += [
-            # Sum all exp values
-            ReduceInstruction(id=head_id + 8, target_register=head_id + 8, source_registers=[head_id + 7],
-                            data_size=data_size),
-            # Divide by sum (exp / sum)
-            FMAInstruction(id=head_id + 9, target_register=head_id + 9, source_registers=[head_id + 7, head_id + 8],
-                        data_size=data_size),
-            # Store result
-            StoreInstruction(id=head_id + 10, source_registers=[head_id + 9], 
-                            data_size=data_size)
-        ]
+        max_reduce_fake_dest = []
+        for i in range(explicit_split_count):
+            dep_group_id = head_id + i*100
+            per_head_insts += [
+                # Load input vector
+                LoadInstruction(id=dep_group_id + 0, target_register=dep_group_id + 0, data_size=reg_width),
+                
+                # Find maximum value
+                ReduceInstruction(id=dep_group_id + 1, target_register=dep_group_id + 1, source_registers=[dep_group_id + 0], 
+                                data_size=reg_width),
+            ]
+            max_reduce_fake_dest.append(dep_group_id + 1)
+
+
+        
+        if not has_exp2_unit:
+            for i in range(explicit_split_count):
+                dep_group_id = head_id + i*100
+                per_head_insts += [
+                    # Subtract max from all elements (x - max)
+                    LoadInstruction(id=dep_group_id + 2, target_register=dep_group_id + 2, dependencies=max_reduce_fake_dest,
+                                data_size=reg_width),
+                    FMAInstruction(id=dep_group_id + 3, target_register=dep_group_id + 3, source_registers=[dep_group_id + 2],
+                                data_size=reg_width),
+                    FMAInstruction(id=dep_group_id + 4, target_register=dep_group_id + 4, source_registers=[dep_group_id + 3],
+                                data_size=reg_width),
+                    FMAInstruction(id=dep_group_id + 5, target_register=dep_group_id + 5, source_registers=[dep_group_id + 4],
+                                data_size=reg_width),
+                    FMAInstruction(id=dep_group_id + 6, target_register=dep_group_id + 6, source_registers=[dep_group_id + 5],
+                                data_size=reg_width),
+                    FMAInstruction(id=dep_group_id + 7, target_register=dep_group_id + 7, source_registers=[dep_group_id + 6],
+                                data_size=reg_width),
+                    FMAInstruction(id=dep_group_id + 8, target_register=dep_group_id + 8, source_registers=[dep_group_id + 7],
+                                data_size=reg_width),
+                    StoreInstruction(id=dep_group_id + 9, target_mem=dep_group_id + 9, source_registers=[dep_group_id + 8], data_size=reg_width)
+                ]
+        else:
+            for i in range(explicit_split_count):
+                dep_group_id = head_id + i*100
+                per_head_insts += [
+                    # Compute exp2(x - max)
+                    LoadInstruction(id=dep_group_id + 2, target_register=dep_group_id + 2, dependencies=max_reduce_fake_dest,
+                                    data_size=reg_width),
+                    EXP2Instruction(id=dep_group_id + 8, target_register=dep_group_id + 8, source_registers=[dep_group_id + 2],
+                                    data_size=reg_width),
+                    StoreInstruction(id=dep_group_id + 9, target_mem=dep_group_id + 9, source_registers=[dep_group_id + 8], data_size=reg_width)
+                ]
+
+        sum_reduce_fake_dest = []
+        for i in range(explicit_split_count):
+            dep_group_id = head_id + i*100
+            per_head_insts += [
+                # Sum all exp values
+                ReduceInstruction(id=dep_group_id + 10, target_register=dep_group_id + 10, source_registers=[dep_group_id + 8],
+                                  data_size=reg_width),
+            ]
+            sum_reduce_fake_dest.append(dep_group_id + 10)
+        
+        for i in range(explicit_split_count):
+            dep_group_id = head_id + i*100
+            per_head_insts += [
+                LoadInstruction(id=dep_group_id + 11, target_register=dep_group_id + 11, dependencies=[dep_group_id + 9],
+                                data_size=reg_width),
+                # Divide by sum (exp / sum)
+                FMAInstruction(id=dep_group_id + 12, target_register=dep_group_id + 12,
+                               source_registers=[dep_group_id + 11] + sum_reduce_fake_dest,
+                               data_size=reg_width),
+                # Store result
+                StoreInstruction(id=dep_group_id + 13, source_registers=[dep_group_id + 12], data_size=reg_width)
+            ]
 
         all_insts.extend(per_head_insts)
     
@@ -1017,6 +1050,14 @@ def parse_arguments():
         type=int,
         default=8,
         help="The number of attention heads",
+    )
+
+    parser.add_argument(
+        '--seq-chunk-bits',
+        type=int,
+        choices=[512, 1024, 2048, 4096, 8192],
+        default=2048,
+        help="The sequence chunk bits",
     )
     
     parser.add_argument(
@@ -1131,7 +1172,7 @@ def main():
     processor = VectorProcessor(config)
     
     # Load sample softmax instruction stream
-    instructions = create_softmax_instruction_stream(args.register_width, args.exp2_unit, args.num_heads)
+    instructions = create_softmax_instruction_stream(args.register_width, args.exp2_unit, args.num_heads, args.seq_chunk_bits)
     processor.load_instructions(instructions)
     
     print(f"Loaded {len(instructions)} instructions for softmax computation")
@@ -1142,7 +1183,7 @@ def main():
     print()
     
     # Run simulation with longer timeout now
-    results = processor.simulate(max_cycles=10000)
+    results = processor.simulate(max_cycles=100000)
 
     assert processor.get_outstanding_instruction_count() == 0
     assert processor.get_outstanding_uop_count() == 0
