@@ -1070,6 +1070,7 @@ def parse_arguments():
 
     parser.add_argument(
         "--all-compute-widths",
+        type=int,
         choices=[128, 256, 512, 1024],
         default=512,
         help="Control all compute unit widths in bits",
